@@ -24,6 +24,16 @@ export interface UseDockLayoutOptions {
 
 const DEFAULT_LOAD_RETRY_DELAYS_MS = [150, 400, 900];
 
+function shouldRetryLoad(err: unknown): boolean {
+  if (err instanceof TypeError) return true;
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  // HTTP responses from createFetchDockLayoutStore are explicit, actionable
+  // server results. Retry only transport-style failures that match the desktop
+  // restart/HMR blip this backoff was added for.
+  if (/→\s*\d{3}\b/.test(msg)) return false;
+  return /failed to fetch|load failed|networkerror|network request failed/i.test(msg);
+}
+
 export interface UseDockLayoutResult {
   state: DockLayoutState;
   save: (layout: DockLayoutRow['layoutJson'], opts?: { force?: boolean }) => Promise<DockLayoutRow>;
@@ -66,8 +76,10 @@ export function useDockLayout(
         } catch (err) {
           lastErr = err as Error;
           // Wait out the backoff before the next retry (no wait after the last).
-          if (attempt < delays.length) {
+          if (attempt < delays.length && shouldRetryLoad(err)) {
             await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+          } else {
+            break;
           }
         }
       }
