@@ -24,14 +24,50 @@ export interface UseDockLayoutOptions {
 
 const DEFAULT_LOAD_RETRY_DELAYS_MS = [150, 400, 900];
 
-function shouldRetryLoad(err: unknown): boolean {
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Whether a failed layout load should be retried. Transport-style failures
+ * (a bare `TypeError`, "Failed to fetch", "Load failed", "NetworkError") are
+ * the transient desktop-webview blip this backoff exists for → retry. An
+ * explicit HTTP response from `createFetchDockLayoutStore` (its messages embed
+ * "→ <status>") is an actionable server result, not a blip → surface it now.
+ * Exported for testing.
+ */
+export function shouldRetryLoad(err: unknown): boolean {
   if (err instanceof TypeError) return true;
   const msg = err instanceof Error ? err.message : String(err ?? '');
-  // HTTP responses from createFetchDockLayoutStore are explicit, actionable
-  // server results. Retry only transport-style failures that match the desktop
-  // restart/HMR blip this backoff was added for.
   if (/→\s*\d{3}\b/.test(msg)) return false;
   return /failed to fetch|load failed|networkerror|network request failed/i.test(msg);
+}
+
+/**
+ * Run `load`, retrying transient (transport-style) failures with the given
+ * backoff delays before giving up. Attempt 0 is the initial load; on a
+ * retryable failure it waits `delays[i]` then retries, up to `delays.length`
+ * retries. A non-retryable failure (or the last attempt) rejects with the last
+ * error. Pure aside from the injected `sleep`; never swallows the final error.
+ * Exported for testing.
+ */
+export async function attemptLayoutLoad<T>(
+  load: () => Promise<T>,
+  delays: readonly number[],
+  sleep: (ms: number) => Promise<void> = defaultSleep,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      return await load();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < delays.length && shouldRetryLoad(err)) {
+        await sleep(delays[attempt]);
+      } else {
+        break;
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('layout load failed');
 }
 
 export interface UseDockLayoutResult {
@@ -64,29 +100,13 @@ export function useDockLayout(
     let cancelled = false;
     setState({ status: 'loading', row: null, error: null });
 
-    void (async () => {
-      const delays = retryRef.current;
-      let lastErr: Error | null = null;
-      for (let attempt = 0; attempt <= delays.length; attempt++) {
-        if (cancelled) return;
-        try {
-          const row = await fetchOnce();
-          if (!cancelled) setState({ status: 'ready', row, error: null });
-          return;
-        } catch (err) {
-          lastErr = err as Error;
-          // Wait out the backoff before the next retry (no wait after the last).
-          if (attempt < delays.length && shouldRetryLoad(err)) {
-            await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
-          } else {
-            break;
-          }
-        }
-      }
-      if (!cancelled) {
-        setState({ status: 'error', row: null, error: lastErr ?? new Error('layout load failed') });
-      }
-    })();
+    attemptLayoutLoad(fetchOnce, retryRef.current)
+      .then((row) => {
+        if (!cancelled) setState({ status: 'ready', row, error: null });
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setState({ status: 'error', row: null, error: err });
+      });
 
     return () => {
       cancelled = true;
