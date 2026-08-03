@@ -25,17 +25,47 @@ export class DockLayoutConflictError extends Error {
   }
 }
 
-export function createFetchDockLayoutStore(basePath = '/api/dock-layouts'): DockLayoutStore {
-  const pathFor = (name: string) => `${basePath.replace(/\/$/, '')}/${encodeURIComponent(name)}`;
+export interface FetchDockLayoutStoreOptions {
+  /**
+   * Extra query parameters appended to EVERY request this store makes.
+   *
+   * This exists because the layout a host reads and the layout it writes must
+   * resolve to the same owner/scope on the server. When the server derives that
+   * scope from the request URL, a store that omits it silently reads one row and
+   * writes another — the write "succeeds" (2xx), the read is unchanged, and the
+   * UI simply does not update, with no error anywhere to attribute it to.
+   *
+   * Called per request so a host can supply a value that changes at runtime.
+   * Entries that are null/undefined/empty are dropped.
+   */
+  searchParams?: () => Record<string, string | undefined | null>;
+}
+
+export function createFetchDockLayoutStore(
+  basePath = '/api/dock-layouts',
+  opts: FetchDockLayoutStoreOptions = {},
+): DockLayoutStore {
+  const pathFor = (name: string) => {
+    const base = `${basePath.replace(/\/$/, '')}/${encodeURIComponent(name)}`;
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(opts.searchParams?.() ?? {})) {
+      if (v != null && v !== '') qs.set(k, v);
+    }
+    const q = qs.toString();
+    return q ? `${base}?${q}` : base;
+  };
+  // Named so `reset` can re-read through THIS implementation rather than
+  // `this.load` — see the note in `reset`.
+  const load: DockLayoutStore['load'] = async (name) => {
+    const resp = await fetch(pathFor(name));
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(`GET ${pathFor(name)} → ${resp.status}: ${text}`);
+    }
+    return normalizeRow(await resp.json());
+  };
   return {
-    async load(name) {
-      const resp = await fetch(pathFor(name));
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => '');
-        throw new Error(`GET ${pathFor(name)} → ${resp.status}: ${text}`);
-      }
-      return normalizeRow(await resp.json());
-    },
+    load,
     async save(name, layout, opts = {}) {
       const headers: Record<string, string> = { 'content-type': 'application/json' };
       if (!opts.force && typeof opts.expectedUpdatedTs === 'number') {
@@ -59,7 +89,12 @@ export function createFetchDockLayoutStore(basePath = '/api/dock-layouts'): Dock
         const text = await resp.text().catch(() => '');
         throw new Error(`DELETE ${pathFor(name)} → ${resp.status}: ${text}`);
       }
-      return this.load(name);
+      // Deliberately `load`, NOT `this.load`: a host may override `load` with a
+      // CACHED reader (a shared query cache with a stale window). Reading a reset
+      // back through such a cache can return the pre-reset row, so the caller
+      // "resets" and sees no change — the failure looks like the reset silently
+      // doing nothing. A reset must re-read authoritatively.
+      return load(name);
     },
   };
 }

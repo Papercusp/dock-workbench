@@ -138,4 +138,65 @@ describe('createFetchDockLayoutStore', () => {
     expect(fetchMock.mock.calls[0][1].method).toBe('DELETE');
     expect(got.layoutName).toBe('adv:papercusp');
   });
+
+  // EI-19425275400158684 — reads and writes MUST resolve to the same server-side
+  // scope. When the server derives that scope from the request URL, a store that
+  // omits it reads one row and writes another: every write returns 2xx, the row
+  // the UI reads never changes, and nothing errors. That is unattributable from
+  // the symptom, so it is pinned here on every verb, not just one.
+  describe('searchParams scoping', () => {
+    it('appends the params to load, save AND reset — not just one verb', async () => {
+      fetchMock
+        .mockResolvedValueOnce({ ok: true, json: async () => row }) // load
+        .mockResolvedValueOnce({ ok: true, json: async () => row }) // save
+        .mockResolvedValueOnce({ ok: true, status: 204 }) // reset DELETE
+        .mockResolvedValueOnce({ ok: true, json: async () => row }); // reset reload
+      const store = createFetchDockLayoutStore('/api/dock-layouts', {
+        searchParams: () => ({ ws: 'papercusp-workspace' }),
+      });
+      await store.load('adv:papercusp');
+      await store.save('adv:papercusp', seedDoc());
+      await store.reset('adv:papercusp');
+      for (const [url] of fetchMock.mock.calls) {
+        expect(url).toBe('/api/dock-layouts/adv%3Apapercusp?ws=papercusp-workspace');
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    });
+
+    it('is re-read per request, so a host can change scope at runtime', async () => {
+      let ws = 'first';
+      fetchMock.mockResolvedValue({ ok: true, json: async () => row });
+      const store = createFetchDockLayoutStore('/api/dock-layouts', { searchParams: () => ({ ws }) });
+      await store.load('x');
+      ws = 'second';
+      await store.load('x');
+      expect(fetchMock.mock.calls[0][0]).toContain('ws=first');
+      expect(fetchMock.mock.calls[1][0]).toContain('ws=second');
+    });
+
+    it('omits empty/absent values instead of sending ws=', async () => {
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => row });
+      const store = createFetchDockLayoutStore('/api/dock-layouts', {
+        searchParams: () => ({ ws: '', other: undefined }),
+      });
+      await store.load('x');
+      expect(fetchMock.mock.calls[0][0]).toBe('/api/dock-layouts/x');
+    });
+  });
+
+  // EI-19425275400158684 (second defect): `reset` used to re-read via `this.load`,
+  // so a host overriding `load` with a CACHED reader got the PRE-reset row back
+  // and the UI showed no change — the reset looked like it silently did nothing.
+  it('reset re-reads through its OWN load, never a caller-overridden cached one', async () => {
+    fetchMock
+      .mockResolvedValueOnce({ ok: true, status: 204 }) // DELETE
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ...row, updatedTs: 99 }) }); // authoritative re-read
+    const base = createFetchDockLayoutStore();
+    const staleLoad = vi.fn(async () => ({ ...row, updatedTs: 2 }));
+    // Exactly how a host wraps it: spread + override `load` with a cached reader.
+    const hostStore = { ...base, load: staleLoad };
+    const got = await hostStore.reset('adv:papercusp');
+    expect(staleLoad).not.toHaveBeenCalled();
+    expect(got.updatedTs).toBe(99);
+  });
 });
