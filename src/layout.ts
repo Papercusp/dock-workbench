@@ -72,6 +72,68 @@ export function validateLayoutDoc(doc: unknown): asserts doc is LayoutDoc {
   }
 }
 
+/**
+ * Every distinct panel `type` a layout references — docked groups AND floating
+ * groups. Shared by the component-bridge map and the dead-layout classifier
+ * below so the two can never disagree about what a layout "contains".
+ */
+export function collectPanelTypes(doc: LayoutDoc): Set<string> {
+  const into = new Set<string>();
+  function walk(n: GroupNode | TabStrip | null | undefined): void {
+    if (!n) return;
+    if (n.kind === 'tabs') {
+      for (const p of n.panels ?? []) into.add(p.type);
+    } else {
+      for (const c of n.children ?? []) walk(c);
+    }
+  }
+  walk(doc.root);
+  for (const f of doc.floating ?? []) {
+    for (const p of f.panels ?? []) into.add(p.type);
+  }
+  return into;
+}
+
+/**
+ * True when a persisted layout is DEAD — i.e. every panel it references is a
+ * type this build can never render, so hydrating it produces a wall of
+ * "not installed" placeholders and zero usable panes. The caller's recovery is
+ * to fall back to the seed.
+ *
+ * ⚠ The obvious rule — "no panel type is registered ⇒ dead" — is UNSAFE, and
+ * getting this wrong is worse than the bug it fixes. A host may register some
+ * panel types ASYNCHRONOUSLY (a plugin fetched at runtime); until that lands,
+ * a perfectly VALID layout referencing those types looks identical to a dead
+ * one. A guard without the exemption would discard a good layout whenever that
+ * fetch was slow — an intermittent, load-dependent data-loss bug.
+ *
+ * Hence `isDeferredType`: the host declares which types may still be arriving,
+ * and those NEVER count as dead. Callers should also allow a short grace window
+ * before acting, so synchronous registrations racing first paint settle first.
+ *
+ * A PARTLY-dead layout is deliberately NOT dead: its live panes still work, and
+ * showing a placeholder beside them is informative and recoverable, whereas
+ * silently deleting a user's arrangement is neither.
+ *
+ * @param isRegistered   does this build currently render `type`?
+ * @param isDeferredType may `type` still be registered later? (never dead)
+ */
+export function isLayoutEntirelyUnregistered(
+  doc: LayoutDoc,
+  isRegistered: (type: string) => boolean,
+  isDeferredType?: (type: string) => boolean,
+): boolean {
+  const types = collectPanelTypes(doc);
+  // An empty layout is not "dead" — there is nothing to have gone stale, and
+  // reseeding it would fight a host that legitimately renders an empty dock.
+  if (types.size === 0) return false;
+  for (const type of types) {
+    if (isRegistered(type)) return false;
+    if (isDeferredType?.(type)) return false;
+  }
+  return true;
+}
+
 export function isWellFormedLayout(doc: unknown): doc is LayoutDoc {
   if (!doc || typeof doc !== 'object') return false;
   if ((doc as { schemaVersion?: unknown }).schemaVersion !== CURRENT_LAYOUT_SCHEMA_VERSION) return false;

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewPanelProps } from 'dockview';
 import 'dockview-react/dist/styles/dockview.css';
-import { isWellFormedLayout, type LayoutDoc } from './layout';
+import { collectPanelTypes, isLayoutEntirelyUnregistered, isWellFormedLayout, type LayoutDoc } from './layout';
 import { toDockviewJson, toLayoutDoc, type DockviewLayout } from './layout-adapter';
 import { panelRegistry as defaultRegistry, type PanelComponent, type PanelComponentProps, type PanelRegistry } from './panel-registry';
 import { DockLayoutConflictError, type DockLayoutStore } from './store';
@@ -16,6 +16,17 @@ export interface DockWorkspaceProps {
   loadEventName?: string;
   missingComponent?: PanelComponent;
   canClosePanel?: (panelId: string) => Promise<boolean> | boolean;
+  /**
+   * Declares which panel types may still be registered LATER (e.g. plugins
+   * fetched at runtime), so the dead-layout guard never mistakes a
+   * not-yet-loaded panel for a retired one. See
+   * `isLayoutEntirelyUnregistered` — omitting this makes the guard STRICTER,
+   * never looser, so a host with only static panels needs nothing here.
+   *
+   * Must be referentially stable (module scope / useCallback); a fresh arrow
+   * each render re-runs the guard's memo every commit.
+   */
+  isDeferredPanelType?: (type: string) => boolean;
   onApiReady?: (api: DockviewApi) => void;
   onApiDispose?: () => void;
   onPanelRemoved?: (panelId: string) => void;
@@ -60,34 +71,34 @@ function makeBridge(type: string, registry: PanelRegistry, Missing: PanelCompone
   return Bridge;
 }
 
-function collectTypes(doc: LayoutDoc, into: Set<string>): void {
-  function walk(n: LayoutDoc['root'] | null | undefined): void {
-    if (!n) return;
-    if (n.kind === 'tabs') {
-      for (const p of n.panels ?? []) into.add(p.type);
-    } else {
-      for (const c of n.children ?? []) walk(c);
-    }
-  }
-  walk(doc.root);
-  for (const f of doc.floating ?? []) {
-    for (const p of f.panels ?? []) into.add(p.type);
-  }
+/**
+ * How long the dead-layout guard waits before reseeding. Covers registrations
+ * that land in an ancestor's mount effect (React runs child effects first), so
+ * the guard cannot fire on a layout that was about to become renderable.
+ */
+const DEAD_LAYOUT_RESEED_GRACE_MS = 300;
+
+/**
+ * Re-renders on every registry mutation. Owned HERE rather than inside
+ * `useComponentsForLayout` because the dead-layout guard needs the same signal:
+ * one subscription feeding both keeps them evaluating the same registry state.
+ */
+function useRegistryVersion(registry: PanelRegistry): number {
+  const [tick, setTick] = useState(0);
+  useEffect(() => registry.subscribe(() => setTick((t) => t + 1)), [registry]);
+  return tick;
 }
 
 function useComponentsForLayout(
   layout: LayoutDoc | null,
   registry: PanelRegistry,
   Missing: PanelComponent,
-  canClose?: DockWorkspaceProps['canClosePanel'],
+  canClose: DockWorkspaceProps['canClosePanel'] | undefined,
+  registryTick: number,
 ): Record<string, PanelComponent> {
-  const [registryTick, setRegistryTick] = useState(0);
-  useEffect(() => registry.subscribe(() => setRegistryTick((t) => t + 1)), [registry]);
-
   return useMemo(() => {
     void registryTick;
-    const types = new Set<string>();
-    if (layout) collectTypes(layout, types);
+    const types = layout ? collectPanelTypes(layout) : new Set<string>();
     for (const t of registry.list()) types.add(t);
     types.add('__missing__');
     const map: Record<string, PanelComponent> = {};
@@ -107,6 +118,7 @@ export function DockWorkspace({
   loadEventName,
   missingComponent = DefaultMissingPanel,
   canClosePanel,
+  isDeferredPanelType,
   onApiReady,
   onApiDispose,
   onPanelRemoved,
@@ -124,7 +136,45 @@ export function DockWorkspace({
   const rawLayout = state.status === 'ready' && state.row.schemaVersion === 1 ? (state.row.layoutJson as LayoutDoc) : null;
   const layoutDoc = isWellFormedLayout(rawLayout) ? rawLayout : null;
   const malformedRow = rawLayout !== null && layoutDoc === null;
-  const components = useComponentsForLayout(layoutDoc, registry, missingComponent, canClosePanel);
+  const registryTick = useRegistryVersion(registry);
+  const components = useComponentsForLayout(layoutDoc, registry, missingComponent, canClosePanel, registryTick);
+
+  // ───────── Dead-layout guard ─────────
+  // A persisted row can outlive the panels it references (types retired from a
+  // later build), and a persisted row WINS over the seed — so the dock hydrates
+  // a wall of "not installed" placeholders with no usable pane, and the only way
+  // out is a reset button the user has to know exists. Detect that and reseed.
+  //
+  // Recovery is `reset()` — the SAME path the reset event uses — so the fix
+  // shares the host's seed rather than inventing a second notion of "default",
+  // and it HEALS the stored row instead of re-deciding this on every load.
+  const layoutIsDead = useMemo(() => {
+    void registryTick; // re-evaluate as registrations land
+    return layoutDoc !== null && isLayoutEntirelyUnregistered(layoutDoc, (t) => registry.has(t), isDeferredPanelType);
+  }, [layoutDoc, registry, registryTick, isDeferredPanelType]);
+
+  const reseededRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!layoutIsDead || !layoutDoc) return;
+    // Once per layout name per mount. A seed that is ITSELF unrenderable must
+    // not spin: one attempt, then live with the placeholders.
+    if (reseededRef.current === activeLayoutName) return;
+    const deadTypes = [...collectPanelTypes(layoutDoc)].join(', ');
+    // Grace window: static registrations can land in an ANCESTOR's mount effect,
+    // which React runs AFTER this child's. Waiting lets those settle — if any
+    // arrives, `layoutIsDead` flips false and this effect's cleanup cancels the
+    // reseed before it ever fires.
+    const t = setTimeout(() => {
+      reseededRef.current = activeLayoutName;
+      console.warn(
+        `[DockWorkspace] layout "${activeLayoutName}" references only unrenderable panel types ` +
+          `(${deadTypes}) — reseeding from the default layout.`,
+      );
+      restoredOnceRef.current = false;
+      void reset().catch((err) => console.error('[DockWorkspace] dead-layout reseed failed:', err));
+    }, DEAD_LAYOUT_RESEED_GRACE_MS);
+    return () => clearTimeout(t);
+  }, [layoutIsDead, activeLayoutName, layoutDoc, reset]);
 
   const recoveredTsRef = useRef<number | null>(null);
   useEffect(() => {
