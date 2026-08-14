@@ -118,7 +118,22 @@ function panelToDv(p: PanelInstance): DvSerializedPanel {
 
 export function toLayoutDoc(dv: DockviewLayout): LayoutDoc {
   const rootDir: 'row' | 'col' = dv.grid.orientation === 'VERTICAL' ? 'col' : 'row';
-  const root = gridNodeToNode(dv.grid.root, dv.panels, rootDir);
+  // INVERSE of toDockviewJson's root-branch wrap. That direction must always emit a
+  // branch at the root (dockview's persisted grid contract) even when the logical
+  // layout is a single tab strip — so this direction has to unwrap it again, or a
+  // compact `tabs` root does not survive a round trip and comes back as a `group`
+  // wrapping one child. Both root forms serialize to the SAME dockview JSON (a branch
+  // with one leaf), so that shape is genuinely ambiguous on the way back and the
+  // compact form is the canonical inverse: it is what a caller wrote, it re-serializes
+  // identically, and it makes roundTrip idempotent. Only a SINGLE-LEAF root branch is
+  // unwrapped — a one-child branch whose child is itself a branch is a real nested
+  // group and is left alone.
+  const dvRoot = dv.grid.root;
+  const soleLeafRoot =
+    dvRoot.type === 'branch' && dvRoot.data.length === 1 && dvRoot.data[0]?.type === 'leaf'
+      ? dvRoot.data[0]
+      : dvRoot;
+  const root = gridNodeToNode(soleLeafRoot, dv.panels, rootDir);
   const floating = (dv.floatingGroups ?? []).map((fg) => ({
     id: fg.data.data.id,
     x: fg.position.left,
