@@ -71,6 +71,70 @@ describe('toDockviewJson', () => {
     });
   });
 
+  /**
+   * The INVERSE of the wrap above. The wrap shipped with a forward-direction test only,
+   * which left roundTrip asymmetric: a compact `tabs` root came back as a `group` around
+   * one child. That reddened apps/operator's mirror test (a re-export of this package) —
+   * a cross-repo break, since this lib is edited from sidestage and consumed by papercusp.
+   */
+  it('unwraps the synthetic root branch so a tab-only root survives a round trip', () => {
+    const tabRootDoc: LayoutDoc = {
+      schemaVersion: 1,
+      root: {
+        kind: 'tabs',
+        id: 'manager',
+        activePanelId: 'event-settings',
+        panels: [
+          { id: 'event-manager', type: 'event-manager' },
+          { id: 'event-settings', type: 'event-settings' },
+        ],
+      },
+    };
+
+    const back = toLayoutDoc(toDockviewJson(tabRootDoc));
+    expect(back.root.kind).toBe('tabs');
+    const root = back.root as Extract<LayoutDoc['root'], { kind: 'tabs' }>;
+    expect(root.id).toBe('manager');
+    expect(root.activePanelId).toBe('event-settings');
+    expect(root.panels.map((p) => p.id)).toEqual(['event-manager', 'event-settings']);
+    // Idempotent: re-serializing the unwrapped doc still yields dockview's required
+    // branch root, so unwrapping never costs the forward contract.
+    expect(toDockviewJson(back).grid.root.type).toBe('branch');
+  });
+
+  /**
+   * FALSIFIABILITY / SCOPE. Unwrapping must be limited to a single-LEAF root branch.
+   * A one-child branch whose child is itself a branch is a genuine nested group, and
+   * collapsing it would silently rewrite the caller's layout — so it must survive.
+   */
+  it('does NOT unwrap a one-child root branch whose child is a nested group', () => {
+    const nested: LayoutDoc = {
+      schemaVersion: 1,
+      root: {
+        kind: 'group',
+        id: 'outer',
+        direction: 'row',
+        children: [
+          {
+            kind: 'group',
+            id: 'inner',
+            direction: 'col',
+            children: [
+              { kind: 'tabs', id: 't1', activePanelId: 'p1', panels: [{ id: 'p1', type: 'queue' }] },
+              { kind: 'tabs', id: 't2', activePanelId: 'p2', panels: [{ id: 'p2', type: 'detail' }] },
+            ],
+          },
+        ],
+      },
+    };
+
+    const back = toLayoutDoc(toDockviewJson(nested));
+    expect(back.root.kind).toBe('group');
+    const root = back.root as Extract<LayoutDoc['root'], { kind: 'group' }>;
+    expect(root.children).toHaveLength(1);
+    expect(root.children[0]?.kind).toBe('group');
+  });
+
   it('serializes floating groups with position geometry', () => {
     const withFloat: LayoutDoc = {
       ...doc,
