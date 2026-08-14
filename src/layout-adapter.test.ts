@@ -44,6 +44,33 @@ describe('toDockviewJson', () => {
     expect(toDockviewJson(colDoc).grid.orientation).toBe('VERTICAL');
   });
 
+  it('wraps a root tab strip in the branch required by dockview', () => {
+    const tabRootDoc: LayoutDoc = {
+      schemaVersion: 1,
+      root: {
+        kind: 'tabs',
+        id: 'manager',
+        activePanelId: 'event-manager',
+        panels: [
+          { id: 'event-manager', type: 'event-manager' },
+          { id: 'event-settings', type: 'event-settings' },
+        ],
+      },
+    };
+
+    const dv = toDockviewJson(tabRootDoc);
+    expect(dv.grid.root.type).toBe('branch');
+    expect(dv.grid.root.data).toHaveLength(1);
+    expect(dv.grid.root.data[0]).toMatchObject({
+      type: 'leaf',
+      data: {
+        id: 'manager',
+        views: ['event-manager', 'event-settings'],
+        activeView: 'event-manager',
+      },
+    });
+  });
+
   it('serializes floating groups with position geometry', () => {
     const withFloat: LayoutDoc = {
       ...doc,

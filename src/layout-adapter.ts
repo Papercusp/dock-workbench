@@ -26,7 +26,7 @@ type DvSerializedGridBranch = {
 type DvSerializedGridNode = DvSerializedGridLeaf | DvSerializedGridBranch;
 
 type DvSerializedGrid = {
-  root: DvSerializedGridNode;
+  root: DvSerializedGridBranch;
   height: number;
   width: number;
   orientation: 'HORIZONTAL' | 'VERTICAL';
@@ -71,6 +71,14 @@ export function toDockviewJson(doc: LayoutDoc): DockviewLayout {
   }
 
   const rootDir = doc.root?.kind === 'group' ? doc.root.direction ?? 'row' : 'row';
+  const serializedRoot = nodeToBranch(doc.root);
+  // Dockview's persisted grid contract always requires a branch at the root,
+  // even when the logical layout is a single tab strip. LayoutDoc deliberately
+  // permits that compact root form, so adapt it here instead of forcing every
+  // host seed to invent a one-child group.
+  const root: DvSerializedGridBranch = serializedRoot.type === 'branch'
+    ? serializedRoot
+    : { type: 'branch', data: [serializedRoot] };
   const floatingGroups: DvSerializedFloatingGroup[] = (doc.floating ?? []).map((f) => {
     const leaf: DvSerializedGridLeaf = {
       type: 'leaf',
@@ -89,7 +97,7 @@ export function toDockviewJson(doc: LayoutDoc): DockviewLayout {
 
   return {
     grid: {
-      root: nodeToBranch(doc.root),
+      root,
       orientation: rootDir === 'col' ? 'VERTICAL' : 'HORIZONTAL',
       height: 0,
       width: 0,
