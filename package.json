@@ -36,6 +36,6 @@
   },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "node -e \"const { spawnSync } = require('node:child_process'); const { dirname, resolve } = require('node:path'); const manifestPath = require.resolve('@typescript/native/package.json'); const compiler = resolve(dirname(manifestPath), require(manifestPath).bin.tsc); process.exit(spawnSync(process.execPath, [compiler, '--noEmit', '-p', 'tsconfig.json'], { stdio: 'inherit' }).status ?? 1)\""
   }
 }
