@@ -32,6 +32,7 @@ export interface DockWorkspaceProps {
   onPanelRemoved?: (panelId: string) => void;
   onSaveError?: (error: Error) => void;
   renderError?: (error: Error, actions: { retry: () => void; reset: () => void }) => ReactElement;
+  rightHeaderActionsComponent?: Parameters<typeof DockviewReact>[0]['rightHeaderActionsComponent'];
 }
 
 function DefaultMissingPanel({ panelType }: PanelComponentProps) {
@@ -124,6 +125,7 @@ export function DockWorkspace({
   onPanelRemoved,
   onSaveError,
   renderError,
+  rightHeaderActionsComponent,
 }: DockWorkspaceProps) {
   const [activeLayoutName, setActiveLayoutName] = useState(initialLayoutName);
   useEffect(() => setActiveLayoutName(initialLayoutName), [initialLayoutName]);
@@ -292,6 +294,7 @@ export function DockWorkspace({
       onReady={onReady}
       components={components as unknown as Parameters<typeof DockviewReact>[0]['components']}
       className={className ?? 'dockview-theme-dark'}
+      rightHeaderActionsComponent={rightHeaderActionsComponent}
     />
   );
 }
